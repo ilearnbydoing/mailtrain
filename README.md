@@ -1,8 +1,10 @@
 # Mailtrain
 
-[Mailtrain](http://mailtrain.org) is a self hosted newsletter application built on Node.js (v5+) and MySQL (v5.5+ or MariaDB).
+[Mailtrain](http://mailtrain.org) is a self hosted newsletter application built on Node.js (v7+) and MySQL (v5.5+ or MariaDB).
 
 ![](http://mailtrain.org/mailtrain.png)
+
+> Mailtrain requires at least **Node.js v7**. If you want to use an older version of Node.js then you should use version v1.24 of Mailtrain. You can either download it [here](https://github.com/Mailtrain-org/mailtrain/archive/v1.24.0.zip) or if using git then run `git checkout v1.24.0` before starting it
 
 ## Features
 
@@ -19,6 +21,7 @@ Subscribe to Mailtrain Newsletter [here](http://mailtrain.org/subscription/EysIv
 * [Installation](#installation)
 * [Upgrade](#upgrade)
 * [Using Environment Variables](#using-environment-variables)
+* [Subscription Widget](#subscription-widget)
 * [Cloudron](#cloudron)
 * [Bounce Handling](#bounce-handling)
 * [Testing](#testing)
@@ -44,7 +47,7 @@ Check out [ZoneMTA](https://github.com/zone-eu/zone-mta) as an alternative self 
 
 ## Requirements
 
-  * Nodejs v6+
+  * Nodejs v7+
   * MySQL v5.5 or MariaDB
   * Redis. Optional, disabled by default. Used for session storage and for caching state between multiple processes. If you do not have Redis enabled then you can only use a single sender process
 
@@ -116,79 +119,70 @@ If you are using the bundled ZoneMTA then you should make sure you are using a p
 
 With proper SPF, DKIM and PTR records (DMARC wouldn't hurt either) I got perfect 10/10 score out from [MailTester](https://www.mail-tester.com/) when sending a campaign message to a MailTester test address. I did not have VERP turned on, so the sender address matched return path address.
 
+#### Getting your head around DKIM, DMARK, SPF and PTR
+
+DKIM, DMARK, SPF and PTR are DNS records which spam filters use to figure out if e-mails were really sent by you (and not by a spammer who tries to conceal his identity to be able to continue send bulks of e-mails people never subscribed for). Assuming that you use zone-mta and your e-mails are to originate from a Mailtrain installation at `mailtrain.example.com` and optionally from `mail.example.net`, to practically set all these records up you will need to:
+
+1. generate genrate a private and public DKIM key
+
+```sh
+mkdir /opt/dkim-keys
+chmod 700 /opt/dkim-keys
+pushd /opt/dkim-keys
+openssl genrsa -out mailtrain.example.com.key 2048 # private key mailtrain.example.com.key
+openssl rsa -in mailtrain.example.com.key -out mailtrain.example.com.pub -pubout -outform PEM # public key mailtrain.example.com.pub
+```
+
+2. add 3 new txt records for the mailtrain.example.com that will most likely similar to the example below:
+
+```
+default._domainkey.mailtrain.example.com     TXT    "k=rsa; p=[public key in one line];"
+mailtrain.example.com                        TXT    "v=spf1 mx a a:mail.example.net -all"
+_dmarc.mailtrain.example.com                 TXT    "v=DMARC1; p=reject"
+```
+
+(refer to a google search for a DKIM generator, SPF generator and DMARC genreator to get you up to speed). Configure your Mailtrain settings accoring to this:
+
+**DKIM domain:** mailtrain.example.com
+**DKIM selector:** default
+**DKIM Private Key:** [copy and paste the private key in /opt/dkim-keys/mailtrain.example.com.key]
+
+The above steps will have the following effect:
+
+- all messages sent by Mailtrain / Zone-mta will be signed by the DKIM Private Key (the signature becomes a part of the e-mail)
+- when a spamfilter encounters this signature, it will look for the **<DKIM selector>**._domainkey.**<DKIM domain>** TXT record, and use the public key stored there to verify that the signature is valid
+- additionally, the spamfilter will look for a TXT SPF record and will look a if the e-mail was sent from the IP address of mailtrain.example.com or mail.example.net.  If the sender IP or domain is different, it will discard the e-mail as spam.
+- furthermore, the spamfilter looks for the DMARC record, which tells it what to do with mails that aren't signed with DKIM or which don't have a valid signature. The example above will tell the spamfilter to reject such a mail as well.
+
+3. You are now almost set. To further confirm that you have full control over your network, the last step is to set up a PTR record, which will give the right answer for a reverse DNS lookup (answer to "what domain name is bound to IP address xxx.xxx.xxx.xxx). If you run your own DNS, you probably know it will look similar to this:
+
+```
+10.27/1.110.220.in-addr.arpa. 	1800 	PTR 	mailtrain.example.com.
+```
+
+If you run Mailtrain on a VPS, you will have to find the PTR configuration somewhere in your administration interface or ask your provider to help you.
+
+
 ### Simple Install (Docker)
-##### Requirements:
-    * Docker
-    * docker-compose
+#### Requirements:
 
-  1. Download Mailtrain files using git: `git clone git://github.com/Mailtrain-org/mailtrain.git` (or download [zipped repo](https://github.com/Mailtrain-org/mailtrain/archive/master.zip)) and open Mailtrain folder `cd mailtrain`
-  2. Run `sudo docker build -t mailtrain-node:latest .`
-  3. Copy default.toml to production.toml. Run `sudo mkdir -p /etc/mailtrain && sudo cp config/default.toml /etc/mailtrain/production.toml`
-  4. Create `/etc/docker-compose.yml`. Example (dont forget change MYSQL_ROOT_PASS and MYSQL_USER_PASSWORD to your passwords):
-  ```
-  version: '2'
-  services:
-    mailtrain-mysql:
-        image: mysql:latest
-        ports:
-          - "3306:3306"
-        container_name: "mailtrain-mysql"
-        restart: always
-        environment:
-           MYSQL_ROOT_PASSWORD: "MYSQL_ROOT_PASS"
-           MYSQL_DATABASE: "mailtrain"
-           MYSQL_USER: "mailtrain"
-           MYSQL_PASSWORD: "MYSQL_USER_PASSWORD"
-        volumes:
-           - mailtrain-mysq-data:/var/lib/mysql
+  * [Docker](https://www.docker.com/)
+  * [Docker Compose](https://docs.docker.com/compose/)
 
-    mailtrain-redis:
-        image: redis:3.0
-        container_name: "mailtrain-redis"
-        volumes:
-           - mailtrain-redis-data:/data
+#### Install:
 
-    mailtrain-node:
-      image: mailtrain-node:latest
-      container_name: "mailtrain-node"
-      links:
-        - "mailtrain-mysql:mailtrain-mysql"
-        - "mailtrain-redis:mailtrain-redis"
-      ports:
-        - "3000:3000"
-      volumes:
-        - "/etc/mailtrain/production.toml:/app/config/production.toml"
-        - "mailtrain-node-data:/app/public/grapejs/uploads"
-        - "mailtrain-node-data:/app/public/mosaico/uploads"
-  volumes:
-    mailtrain-mysq-data: {}
-    mailtrain-redis-data: {}
-    mailtrain-node-data: {}
+* Download Mailtrain files using git: `git clone git://github.com/Mailtrain-org/mailtrain.git` (or download [zipped repo](https://github.com/Mailtrain-org/mailtrain/archive/master.zip)) and open Mailtrain folder `cd mailtrain`
+* **Note**: depending on how you have configured your system and Docker you may need to prepend the commands below with `sudo`.
+* Copy the file `docker-compose.override.yml.tmpl` to `docker-compose.override.yml` and modify it if you need to.
+* Bring up the stack with: `docker-compose up -d`, by default it will use the included `docker-compose.yml` file and override some configurations taken from the `docker-compose.override.yml` file.
+* If you want to use only / copy the `docker-compose.yml` file (for example, if you were deploying with Rancher), you may need to first run `docker-compose build` to make sure your system has a Docker image `mailtrain:latest`.
+* Open [http://localhost:3000/](http://localhost:3000/) (change the host name `localhost` to the name of the host where you are deploying the system).
+* Authenticate as user `admin` with password `test`
+* Navigate to [http://localhost:3000/settings](http://localhost:3000/settings) and update service configuration.
+* Navigate to [http://localhost:3000/users/account](http://localhost:3000/users/account) and update user information and password.
 
-  ```
-  5. Update MySQL and Redis credintial in `/etc/mailtrain/production.toml` like this:
-  ```
-  [mysql]
-  host="mailtrain-mysql"
-  user="mailtrain"
-  password="MYSQL_USER_PASSWORD"
-  database="mailtrain"
-  port=3306
-  charset="utf8mb4"
-  timezone="UTC"
-
-  [redis]
-  enabled=true
-  host="mailtrain-redis"
-  port=6379
-  db=5
-  ```
-  6. Run docker container with command `sudo docker-compose -f /etc/docker-compose.yml up -d`
-  7. Open [http://localhost:3000/](http://localhost:3000/)
-  8. Authenticate as `admin`:`test`
-  9. Navigate to [http://localhost:3000/settings](http://localhost:3000/settings) and update service configuration
-  10. Navigate to [http://localhost:3000/users/account](http://localhost:3000/users/account) and update user information and password
-
+**Note**: If you need to add or modify custom configurations, copy the file `config/docker-production.toml.tmpl` to `config/production.toml` and modify as you need. By default, the Docker image will do just that, automatically, so you can bring up the stack and it will work with default configurations.
+  
 
 ### Manual Install (any OS that supports Node.js)
 
@@ -232,6 +226,27 @@ Edit [mailtrain.nginx](setup/mailtrain-nginx.conf) (update `server_name` directi
 ### Running as an Upstart Service in Ubuntu 14.04
 
 Edit [mailtrain.conf](setup/mailtrain.conf) (update application folder) and copy it to `/etc/init`
+
+## Subscription Widget
+
+The (experimental) Mailtrain Subscription Widget allows you to embed your sign-up forms on your website. To embed a Widget, you need to:
+
+Enable cross-origin resource sharing in your `config` file and whitelist your site:
+
+```
+[cors]
+# Allow subscription widgets to be embedded
+origins=['https://www.example.com']
+```
+
+Embed the widget code on your website:
+
+```
+<div data-mailtrain-subscription-widget data-url="http://domain/subscription/Byf44R-og/widget">
+    <a href="http://domain/subscription/Byf44R-og">Subscribe to our list</a>
+</div>
+<script src="http://domain/subscription/widget.js"></script>
+```
 
 ## Cloudron
 

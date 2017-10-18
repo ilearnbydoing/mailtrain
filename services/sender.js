@@ -8,6 +8,7 @@ let mailer = require('../lib/mailer');
 let campaigns = require('../lib/models/campaigns');
 let segments = require('../lib/models/segments');
 let lists = require('../lib/models/lists');
+let blacklist = require('../lib/models/blacklist');
 let fields = require('../lib/models/fields');
 let settings = require('../lib/models/settings');
 let links = require('../lib/models/links');
@@ -317,6 +318,7 @@ function formatMessage(message, callback) {
                 }
 
                 let useVerp = config.verp.enabled && configItems.verpUse && configItems.verpHostname;
+                let useVerpSenderHeader = useVerp && config.verp.disablesenderheader !== true;
                 fields.list(list.id, (err, fieldList) => {
                     if (err) {
                         return callback(err);
@@ -330,7 +332,7 @@ function formatMessage(message, callback) {
                     };
 
                     let encryptionKeys = [];
-                    fields.getRow(fieldList, message.subscription, true, true).forEach(field => {
+                    fields.getRow(fieldList, message.subscription, false, true).forEach(field => {
                         if (field.mergeTag) {
                             message.subscription.mergeTags[field.mergeTag] = field.mergeValue || '';
                         }
@@ -388,7 +390,7 @@ function formatMessage(message, callback) {
                                         name: [].concat(message.subscription.firstName || []).concat(message.subscription.lastName || []).join(' '),
                                         address: message.subscription.email
                                     },
-                                    sender: useVerp ? campaignAddress + '@' + configItems.verpHostname : false,
+                                    sender: useVerpSenderHeader ? campaignAddress + '@' + configItems.verpHostname : false,
 
                                     envelope: useVerp ? {
                                         from: campaignAddress + '@' + configItems.verpHostname,
@@ -417,7 +419,7 @@ function formatMessage(message, callback) {
                                         }
                                     },
                                     list: {
-                                        unsubscribe: url.resolve(configItems.serviceUrl, '/subscription/' + list.cid + '/unsubscribe/' + message.subscription.cid + '?auto=yes')
+                                        unsubscribe: url.resolve(configItems.serviceUrl, '/subscription/' + list.cid + '/unsubscribe/' + message.subscription.cid)
                                     },
                                     subject: tools.formatMessage(configItems.serviceUrl, campaign, list, message.subscription, campaign.subject),
                                     html: renderedHtml,
@@ -464,86 +466,129 @@ let sendLoop = () => {
             return setTimeout(sendLoop, 10 * 1000);
         }
 
+        let isThrottled = false;
+
         let getNext = () => {
-            if (!mailer.transport.isIdle()) {
+            if (!mailer.transport.isIdle() || isThrottled) {
                 // only retrieve new messages if there are free slots in the mailer queue
                 return;
             }
 
-            // find an unsent message
-            findUnsent((err, message) => {
-                if (err) {
-                    log.error('Mail', err.stack);
-                    setTimeout(getNext, mailing_timeout);
-                    return;
-                }
-                if (!message) {
-                    setTimeout(getNext, mailing_timeout);
-                    return;
-                }
+            isThrottled = true;
 
-                //log.verbose('Mail', 'Found new message to be delivered: %s', message.subscription.cid);
-                // format message to nodemailer message format
-                formatMessage(message, (err, mail) => {
+            mailer.transport.checkThrottling(() => {
+
+                isThrottled = false;
+
+                // find an unsent message
+                findUnsent((err, message) => {
                     if (err) {
                         log.error('Mail', err.stack);
                         setTimeout(getNext, mailing_timeout);
                         return;
                     }
+                    if (!message) {
+                        setTimeout(getNext, mailing_timeout);
+                        return;
+                    }
 
-                    let tryCount = 0;
-                    let trySend = () => {
-                        tryCount++;
+                    // log.verbose('Mail', 'Found new message to be delivered: %s', message.subscription.cid);
+                    // format message to nodemailer message format
+                    formatMessage(message, (err, mail) => {
+                        if (err) {
+                            log.error('Mail', err.stack);
+                            setTimeout(getNext, mailing_timeout);
+                            return;
+                        }
 
-                        // send the message
-                        mailer.transport.sendMail(mail, (err, info) => {
+                        blacklist.isblacklisted(mail.to.address, (err, blacklisted) => {
                             if (err) {
-                                log.error('Mail', err.stack);
-                                if (err.responseCode && err.responseCode >= 400 && err.responseCode < 500 && tryCount <= 5) {
-                                    // temporary error, try again
-                                    return setTimeout(trySend, tryCount * 1000);
-                                }
+                                log.error('Mail', err);
+                                setTimeout(getNext, mailing_timeout);
+                                return;
                             }
 
-                            let status = err ? 2 : 1;
-                            let response = err && (err.response || err.message) || info.response || info.messageId;
-                            let responseId = response.split(/\s+/).pop();
+                            if (!blacklisted) {
+                                let tryCount = 0;
+                                let trySend = () => {
+                                    tryCount++;
 
-                            db.getConnection((err, connection) => {
-                                if (err) {
-                                    log.error('Mail', err.stack);
-                                    return;
-                                }
-
-                                let query = 'UPDATE `campaigns` SET `delivered`=`delivered`+1 ' + (status === 2 ? ', `bounced`=`bounced`+1 ' : '') + ' WHERE id=? LIMIT 1';
-
-                                connection.query(query, [message.campaignId], err => {
-                                    if (err) {
-                                        log.error('Mail', err.stack);
-                                    }
-
-                                    let query = 'UPDATE `campaign__' + message.campaignId + '` SET status=?, response=?, response_id=?, updated=NOW() WHERE id=? LIMIT 1';
-
-                                    connection.query(query, [status, response, responseId, message.id], err => {
-                                        connection.release();
+                                    // send the message
+                                    mailer.transport.sendMail(mail, (err, info) => {
                                         if (err) {
                                             log.error('Mail', err.stack);
-                                        } else {
-                                            // log.verbose('Mail', 'Message sent and status updated for %s', message.subscription.cid);
+                                            if (err.responseCode && err.responseCode >= 400 && err.responseCode < 500 && tryCount <= 5) {
+                                                // temporary error, try again
+                                                return setTimeout(trySend, tryCount * 1000);
+                                            }
                                         }
+
+                                        let status = err ? 3 : 1;
+                                        let response = err && (err.response || err.message) || info.response || info.messageId;
+                                        let responseId = response.split(/\s+/).pop();
+
+                                        db.getConnection((err, connection) => {
+                                            if (err) {
+                                                log.error('Mail', err.stack);
+                                                return;
+                                            }
+
+                                            let query = 'UPDATE `campaigns` SET `delivered`=`delivered`+1 ' + (status === 3 ? ', `bounced`=`bounced`+1 ' : '') + ' WHERE id=? LIMIT 1';
+
+                                            connection.query(query, [message.campaignId], err => {
+                                                if (err) {
+                                                    log.error('Mail', err.stack);
+                                                }
+
+                                                let query = 'UPDATE `campaign__' + message.campaignId + '` SET status=?, response=?, response_id=?, updated=NOW() WHERE id=? LIMIT 1';
+
+                                                connection.query(query, [status, response, responseId, message.id], err => {
+                                                    connection.release();
+                                                    if (err) {
+                                                        log.error('Mail', err.stack);
+                                                    } else {
+                                                        // log.verbose('Mail', 'Message sent and status updated for %s', message.subscription.cid);
+                                                    }
+                                                });
+                                            });
+                                        });
+                                    });
+                                };
+                                setImmediate(trySend);
+                            } else {
+                                db.getConnection((err, connection) => {
+                                    if (err) {
+                                        log.error('Mail', err);
+                                        return;
+                                    }
+
+                                    let query = 'UPDATE `campaigns` SET `blacklisted`=`blacklisted`+1 WHERE id=? LIMIT 1';
+
+                                    connection.query(query, [message.campaignId], err => {
+                                        if (err) {
+                                            log.error('Mail', err);
+                                        }
+
+                                        let query = 'UPDATE `campaign__' + message.campaignId + '` SET status=?, response=?, response_id=?, updated=NOW() WHERE id=? LIMIT 1';
+
+                                        connection.query(query, [5, 'blacklisted', 'blacklisted', message.id], err => {
+                                            connection.release();
+                                            if (err) {
+                                                log.error('Mail', err);
+                                            }
+                                        });
                                     });
                                 });
-                            });
+                            }
+                            setImmediate(getNext);
                         });
-                    };
-                    setImmediate(trySend);
-                    setImmediate(() => mailer.transport.checkThrottling(getNext));
+                    });
                 });
             });
         };
 
-        mailer.transport.on('idle', () => mailer.transport.checkThrottling(getNext));
-        setImmediate(() => mailer.transport.checkThrottling(getNext));
+        mailer.transport.on('idle', getNext);
+        setImmediate(getNext);
     });
 };
 

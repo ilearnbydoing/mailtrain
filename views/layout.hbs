@@ -35,7 +35,7 @@
 
 </head>
 
-<body class="{{#if user}}logged-in user-{{user.username}}{{/if}}">
+<body class="{{bodyClass}}">
 
     <nav class="navbar navbar-default navbar-static-top">
         <div class="container">
@@ -80,6 +80,11 @@
                                 <li>
                                     <a href="/settings">
                                         <span class="glyphicon glyphicon-cog" aria-hidden="true"></span> {{#translate}}Settings{{/translate}}
+                                    </a>
+                                </li>
+                                <li>
+                                    <a href="/blacklist">
+                                        <span class="glyphicon glyphicon-ban-circle" aria-hidden="true"></span> {{#translate}}Blacklist{{/translate}}
                                     </a>
                                 </li>
                                 <li>

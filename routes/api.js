@@ -3,11 +3,14 @@
 let users = require('../lib/models/users');
 let lists = require('../lib/models/lists');
 let fields = require('../lib/models/fields');
+let blacklist = require('../lib/models/blacklist');
 let subscriptions = require('../lib/models/subscriptions');
+let confirmations = require('../lib/models/confirmations');
 let tools = require('../lib/tools');
 let express = require('express');
 let log = require('npmlog');
 let router = new express.Router();
+let mailHelpers = require('../lib/subscription-mail-helpers');
 
 router.all('/*', (req, res, next) => {
     if (!req.query.access_token) {
@@ -122,7 +125,12 @@ router.post('/subscribe/:listId', (req, res) => {
                 }
 
                 if (/^(yes|true|1)$/i.test(input.REQUIRE_CONFIRMATION)) {
-                    subscriptions.addConfirmation(list, input.EMAIL, req.ip, subscription, (err, cid) => {
+                    const data = {
+                        email: subscription.email,
+                        subscriptionData: subscription
+                    };
+
+                    confirmations.addConfirmation(list.id, 'subscribe', req.ip, data, (err, confirmCid) => {
                         if (err) {
                             log.error('API', err);
                             res.status(500);
@@ -131,11 +139,23 @@ router.post('/subscribe/:listId', (req, res) => {
                                 data: []
                             });
                         }
-                        res.status(200);
-                        res.json({
-                            data: {
-                                id: cid
+
+                        mailHelpers.sendConfirmSubscription(list, input.EMAIL, confirmCid, subscription, (err) => {
+                            if (err) {
+                                log.error('API', err);
+                                res.status(500);
+                                return res.json({
+                                    error: err.message || err,
+                                    data: []
+                                });
                             }
+
+                            res.status(200);
+                            res.json({
+                                data: {
+                                    id: confirmCid
+                                }
+                            });
                         });
                     });
                 } else {
@@ -188,7 +208,8 @@ router.post('/unsubscribe/:listId', (req, res) => {
                 data: []
             });
         }
-        subscriptions.unsubscribe(list.id, input.EMAIL, false, (err, subscription) => {
+
+        subscriptions.getByEmail(list.id, input.EMAIL, (err, subscription) => {
             if (err) {
                 res.status(500);
                 return res.json({
@@ -196,12 +217,30 @@ router.post('/unsubscribe/:listId', (req, res) => {
                     data: []
                 });
             }
-            res.status(200);
-            res.json({
-                data: {
-                    id: subscription.id,
-                    unsubscribed: true
+
+            if (!subscription) {
+                res.status(404);
+                return res.json({
+                    error: 'Subscription with given email not found',
+                    data: []
+                });
+            }
+
+            subscriptions.changeStatus(list.id, subscription.id, false, subscriptions.Status.UNSUBSCRIBED, (err, found) => {
+                if (err) {
+                    res.status(500);
+                    return res.json({
+                        error: err.message || err,
+                        data: []
+                    });
                 }
+                res.status(200);
+                res.json({
+                    data: {
+                        id: subscription.id,
+                        unsubscribed: true
+                    }
+                });
             });
         });
     });
@@ -323,6 +362,85 @@ router.post('/field/:listId', (req, res) => {
                 }
             });
         });
+    });
+});
+
+router.post('/blacklist/add', (req, res) => {
+    let input = {};
+    Object.keys(req.body).forEach(key => {
+        input[(key || '').toString().trim().toUpperCase()] = (req.body[key] || '').toString().trim();
+    });
+    if (!(input.EMAIL) || (input.EMAIL === ''))  {
+      res.status(500);
+      return res.json({
+          error: 'EMAIL argument are required',
+          data: []
+      });
+    }
+    blacklist.add(input.EMAIL, (err) =>{
+      if (err) {
+          res.status(500);
+          return res.json({
+              error: err.message || err,
+              data: []
+          });
+      }
+      res.status(200);
+      res.json({
+          data: []
+      });
+    });
+});
+
+router.post('/blacklist/delete', (req, res) => {
+    let input = {};
+    Object.keys(req.body).forEach(key => {
+        input[(key || '').toString().trim().toUpperCase()] = (req.body[key] || '').toString().trim();
+    });
+    if (!(input.EMAIL) || (input.EMAIL === ''))  {
+      res.status(500);
+      return res.json({
+          error: 'EMAIL argument are required',
+          data: []
+      });
+    }
+    blacklist.delete(input.EMAIL, (err) =>{
+      if (err) {
+          res.status(500);
+          return res.json({
+              error: err.message || err,
+              data: []
+          });
+      }
+      res.status(200);
+      res.json({
+          data: []
+      });
+    });
+});
+
+router.get('/blacklist/get', (req, res) => {
+    let start = parseInt(req.query.start || 0, 10);
+    let limit = parseInt(req.query.limit || 10000, 10);
+    let search = req.query.search || '';
+
+    blacklist.get(start, limit, search, (err, data, total) => {
+      if (err) {
+          res.status(500);
+          return res.json({
+              error: err.message || err,
+              data: []
+          });
+      }
+      res.status(200);
+      res.json({
+          data: {
+            total: total,
+            start: start,
+            limit: limit,
+            emails: data
+          }
+      });
     });
 });
 

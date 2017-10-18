@@ -140,32 +140,7 @@ function processImport(data, callback) {
                 return setImmediate(processRows);
             }
 
-            tools.validateEmail(entry.email, true, err => {
-                if (err) {
-                    let reason = (err.message || '').toString().trim().replace(/^[a-z]Error:\s*/i, '');
-                    log.verbose('Import', 'Failed processing row %s: %s', entry.email, reason);
-                    db.getConnection((err, connection) => {
-                        if (err) {
-                            log.error('Import', err.stack);
-                            return setImmediate(processRows);
-                        }
-
-                        let query = 'INSERT INTO import_failed (`import`, `email`, `reason`) VALUES(?,?,?)';
-                        connection.query(query, [data.id, entry.email, reason], err => {
-                            if (err) {
-                                connection.release();
-                                return setImmediate(processRows);
-                            }
-                            let query = 'UPDATE importer SET `failed`=`failed`+1 WHERE `id`=? LIMIT 1';
-                            connection.query(query, [data.id], () => {
-                                connection.release();
-                                return setImmediate(processRows);
-                            });
-                        });
-                    });
-                    return;
-                }
-
+            function insertToSubscription() {
                 subscriptions.insert(listId, {
                     imported: data.id,
                     status: data.type,
@@ -199,8 +174,39 @@ function processImport(data, callback) {
                         });
                     });
                 });
+            }
 
-            });
+            if (data.emailcheck === 1) {
+                tools.validateEmail(entry.email, true, err => {
+                    if (err) {
+                        let reason = (err.message || '').toString().trim().replace(/^[a-z]Error:\s*/i, '');
+                        log.verbose('Import', 'Failed processing row %s: %s', entry.email, reason);
+                        db.getConnection((err, connection) => {
+                            if (err) {
+                                log.error('Import', err.stack);
+                                return setImmediate(processRows);
+                            }
+
+                            let query = 'INSERT INTO import_failed (`import`, `email`, `reason`) VALUES(?,?,?)';
+                            connection.query(query, [data.id, entry.email, reason], err => {
+                                if (err) {
+                                    connection.release();
+                                    return setImmediate(processRows);
+                                }
+                                let query = 'UPDATE importer SET `failed`=`failed`+1 WHERE `id`=? LIMIT 1';
+                                connection.query(query, [data.id], () => {
+                                    connection.release();
+                                    return setImmediate(processRows);
+                                });
+                            });
+                        });
+                        return;
+                    }
+                    insertToSubscription();
+                });
+            } else {
+                insertToSubscription();
+            }
         };
 
         parser.on('readable', () => {
